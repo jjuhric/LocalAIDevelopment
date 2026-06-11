@@ -1,0 +1,49 @@
+services:
+  api:
+    build: .
+    container_name: agent_api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - redis_cache
+      - localstack
+      - chromadb
+    volumes:
+      - "./local_memory_backup:/app/backup"
+      - "./docs:/app/docs"
+
+  redis_cache:
+    image: redis:alpine
+    container_name: agent_cache
+    ports:
+      - "6379:6379"
+
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack_main
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: agent_chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      # Use a managed Docker Volume instead of a Windows folder
+      - chroma-data:/data
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/data
+    stop_grace_period: 30s
+
+# Declare the named volume at the root level
+volumes:
+  chroma-data:

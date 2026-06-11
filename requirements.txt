@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+boto3
+langchain
+langchain-core
+langchain-openai
+langchain-classic
+langchain-chroma
+langchain-huggingface
+sentence-transformers
+langgraph
