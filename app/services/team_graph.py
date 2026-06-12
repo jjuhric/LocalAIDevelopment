@@ -179,4 +179,13 @@ workflow.add_conditional_edges(
 
 memory_checkpointer = MemorySaver()
 # Compile into an executable runner
-compiled_team_graph = workflow.compile(checkpointer=memory_checkpointer)
+# Old compilation line:
+# compiled_team_graph = workflow.compile(checkpointer=memory_checkpointer)
+
+# New Breakpoint-Enabled Compilation line:
+# This instructs LangGraph to completely halt execution every single time the state machine 
+# transitions away from the reviewer node back into the supervisor block.
+compiled_team_graph = workflow.compile(
+    checkpointer=memory_checkpointer,
+    interrupt_after=["reviewer"]
+)
