@@ -10,7 +10,9 @@ llm = ChatOpenAI(
     base_url=os.getenv("LLM_BASE_URL"), 
     api_key=os.getenv("LLM_API_KEY"), 
     model=os.getenv("LLM_MODEL_NAME"), 
-    temperature=0.1
+    timeout=60.0,
+    temperature=0.1,
+    max_retries=3
 )
 
 tools = [
