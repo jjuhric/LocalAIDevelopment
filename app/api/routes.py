@@ -139,7 +139,7 @@ def fork_thread_history(request: ForkRequest):
         compiled_team_graph.update_state(
             target_state_config,  # Passes complete coordinates including true checkpoint_ns
             {"review_feedback": payload_feedback},
-            as_node="reviewer"    # Preserves systemic node execution boundaries
+            as_node="reviewer_node"    # Preserves systemic node execution boundaries
         )
         
         # 4. Invoke passing None signals the runtime engine to fork and resume off this exact coordinate branch

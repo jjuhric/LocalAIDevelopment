@@ -4,6 +4,11 @@ services:
     container_name: agent_api
     ports:
       - "8000:8000"
+    # =========================================================================
+    # PRODUCTION CHASSIS FIX: OVERRIDE ENTRYPOINT FOR ENTERPRISE LOCAL LLM INFERENCE
+    # Bypasses the 30s Uvicorn boundary to accommodate slow VRAM wakeups from LM Studio
+    # =========================================================================
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 120 --timeout-graceful-shutdown 120
     env_file:
       - .env
     depends_on:
@@ -45,5 +50,6 @@ services:
     stop_grace_period: 30s
 
 # Declare the named volume at the root level
+# Change this at the very bottom of your docker-compose.yml file:
 volumes:
   chroma-data:
