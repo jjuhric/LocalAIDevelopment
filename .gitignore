@@ -217,5 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# docs2
-/docs2/
+# docs.tmp
+/docs.tmp/
