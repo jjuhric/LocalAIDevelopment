@@ -254,7 +254,3 @@ To clear out stale persistent memory backups and completely purge the vector sea
 docker compose down -v
 
 ```
-
-```
-
-```
