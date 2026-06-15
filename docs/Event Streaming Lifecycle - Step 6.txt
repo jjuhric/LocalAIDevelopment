@@ -1,0 +1,10 @@
+[ Client CLI / Frontend ] 
+             │
+      (HTTP POST Request)
+             ▼
+   [ FastAPI Event Generator ] ◄─── (async for event in graph.astream_events)
+             │
+             ├──► [ Intercept: on_chain_start ]       ──► SSE: {"event": "GRAPH_START"}
+             ├──► [ Intercept: on_chat_model_start ]  ──► SSE: {"event": "NODE_START"}
+             ├──► [ Intercept: on_chat_model_stream ] ──► SSE: {"event": "TOKEN_STREAM"}
+             └──► [ Intercept: on_chat_model_end ]    ──► SSE: {"event": "NODE_COMPLETE"}

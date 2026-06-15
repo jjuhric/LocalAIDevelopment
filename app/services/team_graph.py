@@ -31,7 +31,6 @@ def coder_node(state: TeamState) -> Command:
     historical_code = state.get("current_code", "")
     loop_count = state.get("loop_count", 0) + 1
 
-    # Safe exit wall inside the node itself
     if loop_count > 4:
         return Command(
             update={"review_feedback": "ERROR: Maximum engineering iterations exceeded."},
@@ -47,14 +46,25 @@ def coder_node(state: TeamState) -> Command:
     )
 
     response = llm.invoke([HumanMessage(content=system_prompt)])
-    raw_code = response.content.strip()
+    raw_text = response.content.strip()
 
-    # Regex Sanitization Gate
-    raw_code_clean = re.sub(r"^(?:\s*\[.*?\]:?\s*)+", "", raw_code, flags=re.IGNORECASE | re.MULTILINE).strip()
-    code_match = re.search(r"```python\s*(.*?)\s*```", raw_code_clean, flags=re.DOTALL | re.IGNORECASE)
-    clean_code = code_match.group(1).strip() if code_match else raw_code_clean
+    # =========================================================================
+    # ADVANCED SANITIZATION GATE: STRIP COGNITIVE CO-TOXENS NATIVELY
+    # Handle multi-channel thought blocks from local reasoning models cleanly
+    # =========================================================================
+    # 1. Strip out anything enclosed inside the reasoning channel blocks completely
+    cleaned_text = re.sub(r"<\|channel\|?>thought.*?<\|?channel\|?>", "", raw_text, flags=re.DOTALL | re.IGNORECASE).strip()
+    
+    # 2. Safety fallback for loose or alternative thought tags (like raw XML or markdown)
+    cleaned_text = re.sub(r"", "", cleaned_text, flags=re.DOTALL | re.IGNORECASE).strip()
+    
+    # 3. Clean legacy speaker label prefix metrics if present
+    cleaned_text = re.sub(r"^(?:\s*\[.*?\]:?\s*)+", "", cleaned_text, flags=re.IGNORECASE | re.MULTILINE).strip()
+    
+    # 4. Final markdown strip check if the model used code-fencing boundaries
+    markdown_match = re.search(r"```python\s*(.*?)\s*```", cleaned_text, flags=re.DOTALL | re.IGNORECASE)
+    clean_code = markdown_match.group(1).strip() if markdown_match else cleaned_text
 
-    # PEER-TO-PEER HANDOFF: Command explicitly passes state updates and routes directly to the reviewer node
     return Command(
         update={
             "current_code": clean_code,
@@ -63,11 +73,15 @@ def coder_node(state: TeamState) -> Command:
         goto="reviewer_node"
     )
 
-
 def reviewer_node(state: TeamState) -> Command:
     """Autonomous Reviewer Peer. Evaluates state metrics and routes to Coder or END."""
     code_to_review = state.get("current_code", "").strip()
     user_instruction = state["messages"][0].content
+
+    # Check if the state was updated by a manual human approval route override
+    manual_feedback = state.get("review_feedback", "").strip()
+    if manual_feedback == "SYSTEM_HUMAN_APPROVED": # Deterministic structural token
+        return Command(update={"review_feedback": "APPROVED"}, goto=END)
 
     system_prompt = (
         "You are a strict QA Engineer node.\n"
@@ -80,18 +94,11 @@ def reviewer_node(state: TeamState) -> Command:
     response = llm.invoke([HumanMessage(content=system_prompt)])
     review_output = response.content.strip()
     
-    if "APPROVED" in review_output.upper():
-        # PEER-TO-PEER TERMINATION: Explicit greenlight shuts down the state machine natively
-        return Command(
-            update={"review_feedback": "APPROVED"},
-            goto=END
-        )
+    # Force exact uppercase matching to ensure absolute routing predictability
+    if review_output.strip().upper() == "APPROVED":
+        return Command(update={"review_feedback": "APPROVED"}, goto=END)
 
-    # PEER-TO-PEER REJECTION: Direct loop back to the Coder without an intermediate supervisor step
-    return Command(
-        update={"review_feedback": review_output},
-        goto="coder_node"
-    )
+    return Command(update={"review_feedback": review_output}, goto="coder_node")
 
 # ==========================================================
 # GRAPH DEFINITION: CLEAN AND DECOUPLED
@@ -111,5 +118,5 @@ workflow.set_entry_point("coder_node")
 memory_checkpointer = MemorySaver()
 compiled_team_graph = workflow.compile(
     checkpointer=memory_checkpointer,
-    interrupt_after=["coder_node"]  # Forces a hard serialization freeze the split second the coder returns its Command object!
+    interrupt_after=["reviewer_node"]  # Forces a hard serialization freeze the split second the coder returns its Command object!
 )

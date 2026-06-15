@@ -1,4 +1,6 @@
+import json
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 from app.services.team_graph import compiled_team_graph
@@ -21,41 +23,60 @@ class ForkRequest(BaseModel):
     checkpoint_id: str
     override_feedback: str
 
+# =========================================================================
+# PRODUCTION REFACTOR: PROPERLY SCOPED REAL-TIME SSE ASYNC STREAMING
+# =========================================================================
 @router.post("/agent/team-chat")
-def chat_with_team(request: ChatRequest):
-    try:
-        config = {"configurable": {"thread_id": request.thread_id}}
-        current_state = compiled_team_graph.get_state(config)
-        
-        if current_state.next:
-            return {
-                "status": "PAUSED",
-                "waiting_at_node": current_state.next[0],
-                "current_code": current_state.values.get("current_code"),
-                "message": "System frozen at breakpoint. Awaiting manual confirmation."
-            }
-            
-        initial_state = {
-            "messages": [HumanMessage(content=request.message)],
-            "current_code": "",
-            "review_feedback": "",
-            "loop_count": 0
-        }
-        final_state = compiled_team_graph.invoke(initial_state, config=config)
-        
-        post_state = compiled_team_graph.get_state(config)
-        if post_state.next:
-            return {
-                "status": "PAUSED",
-                "waiting_at_node": post_state.next[0],
-                "current_code": post_state.values.get("current_code"),
-                "message": "Breakpoint triggered. Review requested."
-            }
-            
-        return {"status": "COMPLETED", "final_code": final_state.get("current_code")}
-    except Exception as e:
-        logger.error(f"Graph execution failure: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def chat_with_team_stream(request: ChatRequest):
+    """Initializes or resumes a decentralized peer graph, streaming token chunks 
+    and node transitions in real-time over an active SSE connection.
+    """
+    config = {"configurable": {"thread_id": request.thread_id}}
+    
+    initial_state = {
+        "messages": [HumanMessage(content=request.message)],
+        "current_code": "",
+        "review_feedback": "",
+        "loop_count": 0
+    }
+
+    # INDENTED BY 4 SPACES: Now safely nested inside the route function scope!
+    async def event_generator():
+        try:
+            # Hooking v2 structural tracking streams cleanly out of the state manager
+            async for event in compiled_team_graph.astream_events(initial_state, config=config, version="v2"):
+                kind = event["event"]
+                node_name = event.get("metadata", {}).get("langgraph_node", "system")
+
+                # Telemetry Marker 1: Graph Start
+                if kind == "on_chain_start" and event.get("name") == "LangGraph":
+                    yield f"data: {json.dumps({'event': 'GRAPH_START', 'thread_id': request.thread_id})}\n\n"
+                
+                # Telemetry Marker 2: Peer Node Activated
+                elif kind == "on_chat_model_start":
+                    yield f"data: {json.dumps({'event': 'NODE_START', 'node': node_name})}\n\n"
+
+                # Defensive Type Shield: Catch raw character chunks from LM Studio VRAM
+                elif kind == "on_chat_model_stream":
+                    event_data = event.get("data", {})
+                    chunk_obj = event_data.get("chunk")
+                    
+                    if chunk_obj is not None:
+                        token_chunk = getattr(chunk_obj, "content", "") if hasattr(chunk_obj, "content") else str(chunk_obj)
+                        if token_chunk:
+                            yield f"data: {json.dumps({'event': 'TOKEN_STREAM', 'node': node_name, 'token': token_chunk})}\n\n"
+
+                # Telemetry Marker 3: Peer Node Deactivated
+                elif kind == "on_chat_model_end":
+                    yield f"data: {json.dumps({'event': 'NODE_COMPLETE', 'node': node_name})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Streaming thread failure: {str(e)}")
+            yield f"data: {json.dumps({'event': 'ERROR', 'detail': str(e)})}\n\n"
+
+    # Return the stream handler cleanly from the parent endpoint namespace
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 @router.post("/agent/team-approve")
 def approve_agent_action(request: ApprovalRequest):
@@ -66,7 +87,7 @@ def approve_agent_action(request: ApprovalRequest):
         if not current_state.next:
             raise HTTPException(status_code=400, detail="This thread is not currently paused.")
             
-        payload_feedback = "APPROVED" if request.approve else f"REJECTED: {request.human_notes}"
+        payload_feedback = "SYSTEM_HUMAN_APPROVED" if request.approve else f"MANUAL_HUMAN_REJECTION: {request.human_notes}"
         
         compiled_team_graph.update_state(
             config,
@@ -76,24 +97,17 @@ def approve_agent_action(request: ApprovalRequest):
         final_state = compiled_team_graph.invoke(None, config=config)
         return {
             "status": "COMPLETED",
-            "final_code": final_state.get("current_code"),
-            "execution_history": [msg.content for msg in final_state.get("messages", [])]
+            "final_code": final_state.get("current_code")
         }
     except Exception as e:
         logger.error(f"Failed to resume graph: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==========================================================
-# NEW ENDPOINT 1: EXPOSE IMMUTABLE TEMPORAL HISTORIES
-# ==========================================================
 @router.get("/agent/team-history/{thread_id}")
 def get_thread_history(thread_id: str):
-    """Fetches the state snapshots of a specific thread configuration timeline."""
     try:
         config = {"configurable": {"thread_id": thread_id}}
         history_timeline = []
-        
-        # Pulling sequential checkpoints straight out of checkpointer database storage
         for state in compiled_team_graph.get_state_history(config):
             history_timeline.append({
                 "checkpoint_id": state.config["configurable"].get("checkpoint_id"),
@@ -109,48 +123,30 @@ def get_thread_history(thread_id: str):
         logger.error(f"Failed to query thread history: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==========================================================
-# NEW ENDPOINT 2: FORK STATE MACHINE TIME TREES
-# ==========================================================
 @router.post("/agent/team-fork")
 def fork_thread_history(request: ForkRequest):
-    """Insects mutations into a historical checkpoint, resolving namespace trees dynamically."""
     try:
-        # 1. Establish the base search config coordinate
         search_config = {"configurable": {"thread_id": request.thread_id}}
         target_state_config = None
 
-        # 2. Iterate through the checkpointer ledger to locate the complete, true configuration object
         for state in compiled_team_graph.get_state_history(search_config):
             if state.config["configurable"].get("checkpoint_id") == request.checkpoint_id:
-                # Inherit the absolute complete validated config map (including internal namespace keys)
                 target_state_config = state.config
                 break
 
         if not target_state_config:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Checkpoint metadata hash '{request.checkpoint_id}' could not be located in this thread."
-            )
+            raise HTTPException(status_code=404, detail="Checkpoint could not be located.")
 
-        # 3. Execute the state dictionary mutation using the completely validated state config object
-        payload_feedback = f"HUMAN OVERRIDE REJECTION CRITERIA: {request.override_feedback}"
-        
         compiled_team_graph.update_state(
-            target_state_config,  # Passes complete coordinates including true checkpoint_ns
-            {"review_feedback": payload_feedback},
-            as_node="reviewer_node"    # Preserves systemic node execution boundaries
+            target_state_config,
+            {"review_feedback": f"MANUAL_HUMAN_REJECTION: {request.override_feedback}"},
+            as_node="reviewer_node"
         )
-        
-        # 4. Invoke passing None signals the runtime engine to fork and resume off this exact coordinate branch
         final_state = compiled_team_graph.invoke(None, config=target_state_config)
-        
         return {
             "status": "FORK_COMPLETED",
             "final_code": final_state.get("current_code")
         }
-    except HTTPException as http_ex:
-        raise http_ex
     except Exception as e:
         logger.error(f"Failed to execute history fork: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
