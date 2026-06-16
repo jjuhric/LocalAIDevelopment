@@ -23,6 +23,10 @@ class ForkRequest(BaseModel):
     checkpoint_id: str
     override_feedback: str
 
+@router.get("/health")
+def health_check():
+    return {"status": "healthy"}
+
 # =========================================================================
 # PRODUCTION REFACTOR: PROPERLY SCOPED REAL-TIME SSE ASYNC STREAMING
 # =========================================================================
